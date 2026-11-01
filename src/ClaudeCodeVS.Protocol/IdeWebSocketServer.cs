@@ -378,7 +378,8 @@ public sealed class IdeWebSocketServer
 
     private async Task HandlePermissionRequestAsync(HttpListenerContext ctx, JObject o, CancellationToken ct)
     {
-        bool allow = true; // fail-open: never block the CLI because our review path errored
+        bool allow = false;
+        bool ask = false; // review path errored: hand the decision to the CLI's own prompt, never auto-allow
         string? reason = null;
         try
         {
@@ -396,17 +397,20 @@ public sealed class IdeWebSocketServer
             var handler = PermissionHandler;
             if (handler != null && filePath.Length > 0)
                 (allow, reason) = await handler(filePath, newContents, permissionMode, ct);
+            else
+                ask = true; // nothing to review with -> not our call
             Log.Info($"permission decision: {(allow ? "allow" : "deny")} for {filePath}");
         }
         catch (Exception e)
         {
-            Log.Warn($"permission request failed (allowing): {e.Message}");
-            allow = true;
+            Log.Warn($"permission request failed (deferring to CLI prompt): {e.Message}");
+            allow = false;
+            ask = true;
         }
 
         try
         {
-            var json = new JObject { ["allow"] = allow, ["reason"] = reason }.ToString(Formatting.None);
+            var json = new JObject { ["allow"] = allow, ["ask"] = ask, ["reason"] = reason }.ToString(Formatting.None);
             var bytes = Encoding.UTF8.GetBytes(json);
             ctx.Response.StatusCode = 200;
             ctx.Response.ContentType = "application/json; charset=utf-8"; // no charset -> PS 5.1 clients decode as Latin-1 (mojibake)

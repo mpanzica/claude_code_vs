@@ -292,8 +292,11 @@ internal sealed class BridgeHost : IDisposable
         }
         catch (Exception e)
         {
-            Log.Error($"permission diff failed (allowing): {e.Message}");
-            _decisions.Resolve(tab, true); // fail-open
+            // Not an approval: unwind to the server, which answers ask=true so the CLI's own prompt decides.
+            Log.Error($"permission diff failed (deferring to CLI prompt): {e.Message}");
+            _decisions.Resolve(tab, false);
+            Ui.BridgeStatus.RemovePending(tab);
+            throw;
         }
         var d = await decision;
         Ui.BridgeStatus.RemovePending(tab);
@@ -361,10 +364,24 @@ internal sealed class BridgeHost : IDisposable
                 !string.IsNullOrEmpty(root) &&
                 full.StartsWith(root.TrimEnd('\\', '/') + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
+            // ALLOWLIST, not "whole subtree": .claude holds settings.json (hook commands), our hook/shim
+            // .ps1 scripts and ide\*.lock (the bridge token) - writing any of those is code execution on the
+            // next hook, so they must always reach the diff. Only known data-only areas skip review.
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (Under(System.IO.Path.Combine(home, ".claude"))) return true;
-            if (Under(System.IO.Path.GetTempPath())) return true;
-            if (!string.IsNullOrEmpty(workspace) && Under(System.IO.Path.Combine(workspace!, ".claude"))) return true;
+            foreach (var sub in new[] { "projects", "plans", "todos" }) // auto-memory, plan files, todo lists
+                if (Under(System.IO.Path.Combine(home, ".claude", sub))) return true;
+            if (!string.IsNullOrEmpty(workspace) && Under(System.IO.Path.Combine(workspace!, ".claude", "attachments"))) return true;
+
+            if (Under(System.IO.Path.GetTempPath()))
+            {
+                // The CLI's scratchpad is data, but never let temp be a way to drop something runnable
+                // or to tamper with the data-breakpoint IPC channel.
+                if (Under(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "claude-codevs-databp"))) return false;
+                var ext = System.IO.Path.GetExtension(full).ToLowerInvariant();
+                if (ext is ".ps1" or ".psm1" or ".bat" or ".cmd" or ".exe" or ".dll" or ".vbs" or ".js" or ".msi" or ".lnk")
+                    return false;
+                return true;
+            }
             return false;
         }
         catch

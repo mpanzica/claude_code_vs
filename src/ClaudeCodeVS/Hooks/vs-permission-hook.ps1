@@ -1,7 +1,7 @@
 # vs:auto-managed - the Claude Code VS extension (re)writes this file on Launch/connect so fixes ship automatically. Remove THIS LINE to take ownership and the extension will leave this file alone.
 # Single-gate PreToolUse hook for Edit/Write/MultiEdit (auto-installed by the Claude Code VS extension).
 # Reconstructs the proposed file content, posts it to the VS bridge's /permission endpoint, and lets
-# the native VS diff (Accept/Reject) be the SOLE gate. Fail-open: any error -> allow (never block the CLI).
+# the native VS diff (Accept/Reject) be the SOLE gate. Fails toward the CLI's own prompt: any error / no bridge -> no decision (never an auto-allow).
 # Output contract: exit 0 + one JSON line on stdout with the PreToolUse permission decision.
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +11,10 @@ function Emit([string]$decision, [string]$reason) {
         ConvertTo-Json -Compress -Depth 8
     exit 0
 }
+
+# No decision: the CLI runs its normal permission flow. Used for every "we could not review this" path -
+# an explicit 'allow' there would override the CLI's own prompt and let the edit through unreviewed.
+function Defer { exit 0 }
 
 function ApplyEdit([string]$content, [string]$old, [string]$new, [bool]$all) {
     if ([string]::IsNullOrEmpty($old)) { return $content }
@@ -41,7 +45,7 @@ try {
         'Write'     { $new = [string]$ti.content }
         'Edit'      { $new = ApplyEdit $cur $ti.old_string $ti.new_string ([bool]$ti.replace_all) }
         'MultiEdit' { $new = $cur; foreach ($e in $ti.edits) { $new = ApplyEdit $new $e.old_string $e.new_string ([bool]$e.replace_all) } }
-        default     { Emit 'allow' "unhandled tool $tool" }
+        default     { Defer }
     }
 
     # Find the Visual Studio bridge: the MOST-SPECIFIC workspace match (longest workspaceFolders prefix
@@ -81,7 +85,7 @@ try {
     foreach ($cand in ($cands | Sort-Object Score -Descending)) {
         if (Test-Port $cand.Port) { $port = $cand.Port; $token = $cand.Token; break }
     }
-    if (-not $port) { Emit 'allow' 'no Visual Studio bridge lockfile found' }
+    if (-not $port) { Defer }
 
     # Pass the CLI's own permission mode through: when the user chose a pre-approving mode
     # for the session, the bridge allows without opening the diff (our gate must never be stricter
@@ -118,5 +122,6 @@ try {
     }
 }
 catch {
-    Emit 'allow' ("hook error (allowing): " + $_.Exception.Message)
+    [Console]::Error.WriteLine("vs-permission-hook error (deferring to CLI prompt): " + $_.Exception.Message)
+    Defer
 }
